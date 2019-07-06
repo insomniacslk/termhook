@@ -35,13 +35,6 @@ func main() {
 		}
 	}
 
-	/*
-		lineHook := func(w io.Writer, l []byte) error {
-			fmt.Printf("LINE: %s", l)
-			return nil
-		}
-	*/
-
 	hook, err := termhook.NewHook(port, speed, nil)
 	if err != nil {
 		panic(err)
