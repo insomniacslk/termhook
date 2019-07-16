@@ -12,14 +12,15 @@ import (
 )
 
 // LineHandler defines the function that is called at each line of output from
-// the terminal.
-type LineHandler func(w io.Writer, line []byte) error
+// the terminal. The boolean indicates whether the terminal reader should return.
+type LineHandler func(w io.Writer, line []byte) (bool, error)
 
 // Hook is the terminal hook type.
 type Hook struct {
 	term        *term.Term
 	Port        string
 	Speed       int
+	ReadOnly    bool
 	sigs        chan os.Signal
 	lineHandler LineHandler
 }
@@ -46,7 +47,14 @@ func (h *Hook) Run() error {
 	}
 	h.term = t
 	errCh := make(chan error, 1)
-	go h.HandleInputAndSignals(errCh, t)
+	go func() {
+		errCh <- h.handleSignals(t)
+	}()
+	if !h.ReadOnly {
+		go func() {
+			errCh <- h.handleInput(t)
+		}()
+	}
 
 	buf := make([]byte, 1024)
 	for {
@@ -54,11 +62,16 @@ func (h *Hook) Run() error {
 		if err != nil {
 			return err
 		}
-		if err := h.lineHandler(t, buf[:n]); err != nil {
+		stop, err := h.lineHandler(t, buf[:n])
+		if err != nil {
 			log.Printf("Error handling line: %v", err)
 			return err
 		}
+		if stop {
+			break
+		}
 	}
+	return nil
 }
 
 // Close closes the terminal hook.
@@ -66,47 +79,44 @@ func (h *Hook) Close() error {
 	return h.term.Close()
 }
 
-// HandleInputAndSignals handles the input coming from stdin, and the signals
-// sent by the user.
-func (h *Hook) HandleInputAndSignals(errCh chan<- error, w io.Writer) {
+// handleSignals handles the signals received by the process.
+func (h *Hook) handleSignals(w io.Writer) error {
+	ctrlC := []byte{3}
+	sig := <-h.sigs
+	if sig == syscall.SIGINT {
+		if _, err := w.Write(ctrlC); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handleInput handles the input coming from stdin
+func (h *Hook) handleInput(w io.Writer) error {
 	// set stdin unbuffered
 	var a syscall.Termios
 	if err := termios.Tcgetattr(uintptr(syscall.Stdin), (&a)); err != nil {
-		errCh <- err
-		return
+		return err
 	}
 	termios.Cfmakeraw((*syscall.Termios)(&a))
 	if err := termios.Tcsetattr(uintptr(syscall.Stdin), termios.TCSANOW, &a); err != nil {
-		errCh <- err
-		return
+		return err
 	}
 
 	b := make([]byte, 1)
-	ctrlC := []byte{3}
 	for {
-		select {
-		case sig := <-h.sigs:
-			if sig == syscall.SIGINT {
-				if _, err := w.Write(ctrlC); err != nil {
-					errCh <- err
-					return
-				}
-			}
-		default:
-			n, err := os.Stdin.Read(b)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if _, err := w.Write(b[:n]); err != nil {
-				errCh <- err
-				return
-			}
+		n, err := os.Stdin.Read(b)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(b[:n]); err != nil {
+			return err
 		}
 	}
 }
 
-func (h *Hook) defaultLineHandler(w io.Writer, line []byte) error {
+// defaultLineHandler implements LineHandler.
+func (h *Hook) defaultLineHandler(w io.Writer, line []byte) (bool, error) {
 	fmt.Print(string(line))
-	return nil
+	return false, nil
 }
