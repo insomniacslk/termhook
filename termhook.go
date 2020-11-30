@@ -5,10 +5,13 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/pkg/term"
 	"github.com/pkg/term/termios"
+	"golang.org/x/sys/unix"
 )
 
 // LineHandler defines the function that is called at each line of output from
@@ -18,19 +21,18 @@ type LineHandler func(w io.Writer, line []byte) (bool, error)
 // Hook is the terminal hook type.
 type Hook struct {
 	term        *term.Term
-	Port        string
-	Speed       int
-	ReadOnly    bool
-	sigs        chan os.Signal
+	port        string
+	speed       int
+	handleStdin bool
 	lineHandler LineHandler
 }
 
 // NewHook initializes and returns a new Hook object.
-func NewHook(port string, speed int, handler LineHandler) (*Hook, error) {
+func NewHook(port string, speed int, handleStdin bool, handler LineHandler) (*Hook, error) {
 	h := Hook{
-		Port:        port,
-		Speed:       speed,
-		sigs:        make(chan os.Signal, 1),
+		port:        port,
+		speed:       speed,
+		handleStdin: handleStdin,
 		lineHandler: handler,
 	}
 	if h.lineHandler == nil {
@@ -41,18 +43,50 @@ func NewHook(port string, speed int, handler LineHandler) (*Hook, error) {
 
 // Run starts the terminal hook handler. This function is blocking.
 func (h *Hook) Run() error {
-	t, err := term.Open(h.Port, term.Speed(h.Speed), term.RawMode)
+	t, err := term.Open(h.port, term.Speed(h.speed), term.RawMode)
 	if err != nil {
 		return err
 	}
 	h.term = t
-	errCh := make(chan error, 1)
+
+	var wg sync.WaitGroup
+
+	var routineError error
+	var routineErrorOnce sync.Once
+	processRoutineError := func(err error) {
+		if err == nil {
+			return
+		}
+		routineErrorOnce.Do(func() {
+			routineError = err
+		})
+	}
+
+	signalCh := make(chan os.Signal, 1)
+	signal.Notify(signalCh, syscall.SIGINT)
+
+	var stopSignalsOnce sync.Once
+	stopReceivingSignals := func() {
+		stopSignalsOnce.Do(func() {
+			signal.Stop(signalCh)
+			close(signalCh)
+		})
+	}
+	defer stopReceivingSignals()
+
+	wg.Add(1)
 	go func() {
-		errCh <- h.handleSignals(t)
+		defer wg.Done()
+		err := h.handleSignals(signalCh, t)
+		processRoutineError(err)
 	}()
-	if !h.ReadOnly {
+
+	if h.handleStdin {
+		wg.Add(1)
 		go func() {
-			errCh <- h.handleInput(t)
+			defer wg.Done()
+			err := h.handleInput(t)
+			processRoutineError(err)
 		}()
 	}
 
@@ -71,21 +105,29 @@ func (h *Hook) Run() error {
 			break
 		}
 	}
-	return nil
+
+	stopReceivingSignals()
+	wg.Wait()
+	return routineError
 }
 
 // Close closes the terminal hook.
 func (h *Hook) Close() error {
+	if h.term == nil {
+		return nil
+	}
 	return h.term.Close()
 }
 
 // handleSignals handles the signals received by the process.
-func (h *Hook) handleSignals(w io.Writer) error {
+func (h *Hook) handleSignals(signalCh <-chan os.Signal, w io.Writer) error {
 	ctrlC := []byte{3}
-	sig := <-h.sigs
-	if sig == syscall.SIGINT {
-		if _, err := w.Write(ctrlC); err != nil {
-			return err
+	for sig := range signalCh {
+		if sig == syscall.SIGINT {
+			if _, err := w.Write(ctrlC); err != nil {
+				return err
+			}
+			break
 		}
 	}
 	return nil
@@ -94,11 +136,11 @@ func (h *Hook) handleSignals(w io.Writer) error {
 // handleInput handles the input coming from stdin
 func (h *Hook) handleInput(w io.Writer) error {
 	// set stdin unbuffered
-	var a syscall.Termios
-	if err := termios.Tcgetattr(uintptr(syscall.Stdin), (&a)); err != nil {
+	var a unix.Termios
+	if err := termios.Tcgetattr(uintptr(syscall.Stdin), &a); err != nil {
 		return err
 	}
-	termios.Cfmakeraw((*syscall.Termios)(&a))
+	termios.Cfmakeraw(&a)
 	if err := termios.Tcsetattr(uintptr(syscall.Stdin), termios.TCSANOW, &a); err != nil {
 		return err
 	}
