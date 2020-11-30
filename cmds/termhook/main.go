@@ -35,7 +35,7 @@ func main() {
 		}
 	}
 
-	hook, err := termhook.NewHook(port, speed, nil)
+	hook, err := termhook.NewHook(port, speed, false, nil)
 	if err != nil {
 		panic(err)
 	}
