@@ -13,7 +13,6 @@ import (
 
 	"github.com/pkg/term"
 	"github.com/pkg/term/termios"
-	"golang.org/x/sys/unix"
 )
 
 // LineHandler defines the function that is called at each line of output from
@@ -138,12 +137,12 @@ func (h *Hook) handleSignals(signalCh <-chan os.Signal, w io.Writer) error {
 // handleInput handles the input coming from stdin
 func (h *Hook) handleInput(w io.Writer) error {
 	// set stdin unbuffered
-	var a unix.Termios
-	if err := termios.Tcgetattr(uintptr(syscall.Stdin), &a); err != nil {
+	a, err := termios.Tcgetattr(uintptr(syscall.Stdin))
+	if err != nil {
 		return err
 	}
-	termios.Cfmakeraw(&a)
-	if err := termios.Tcsetattr(uintptr(syscall.Stdin), termios.TCSANOW, &a); err != nil {
+	termios.Cfmakeraw(a)
+	if err := termios.Tcsetattr(uintptr(syscall.Stdin), termios.TCSANOW, a); err != nil {
 		return err
 	}
 
